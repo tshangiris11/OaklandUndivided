@@ -1,0 +1,1262 @@
+---
+title: "Final Project-Oakland Undivided"
+author: "Iris Shang"
+date: "2025-02-23"
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+# Oakland Undivided Dataset: Analyzing Internet Accessibility
+
+## Overview
+
+The Oakland Undivided Dataset is a collection of internet speed test data recorded from January 2024 to April 2024. 
+The data originates from devices distributed to students in need across the City of Oakland as part of an 
+initiative to bridge the digital divide.
+
+## Context & Challenges
+
+Despite efforts to provide equitable internet access, reports indicate that students from certain areas 
+still face difficulties connecting to the internet. These challenges may stem from geographic, socioeconomic, 
+or infrastructure-related factors that impact connectivity.
+
+## Dataset Structure
+
+- Each row represents a single speed test conducted by a distributed device.
+- Devices have trackable serial numbers, allowing for analysis of performance across different users and locations.
+- These automated speed tests may occasionally be recorded outside of Oakland as students travel.
+- For this analysis, only speed test results conducted within Oakland will be considered, ensuring relevance to 
+  the local digital divide study.
+
+## Purpose of Analysis
+
+This dataset will be used to:
+- Assess disparities in internet speed across different neighborhoods in Oakland.
+- Identify potential factors affecting connectivity, such as ISP performance, geographic barriers, 
+  and socioeconomic conditions.
+- Support policy recommendations aimed at improving internet accessibility for students.
+
+By focusing on speed test results within Oakland, this analysis aims to provide data-driven insights 
+into digital inequities and inform future interventions to enhance connectivity for students in need.
+
+# Data Cleaning and Merging with US Census API Geographical Data
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+install.packages("leafsync")
+install.packages("rappdirs", dependencies = TRUE)
+
+# Load required libraries
+library(readxl)  
+library(dplyr)  
+library(tidycensus)
+library(stringr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(lubridate)
+
+library(tigris)   # For downloading TIGER/Line shapefiles
+library(sf)       # For handling spatial data
+library(ggthemes) # For better map aesthetics
+library(gridExtra) # For arranging multiple plots
+library(broom) 
+```
+```{r}
+# Define file path
+file_path <- "C:/Users/tshan/Downloads/"
+
+# Define file names
+file_names <- c("1. jan_2024_no_guid.xlsx", 
+                "2. feb_2024_no_guid.xlsx", 
+                "3. mar_2024_no_guid.xlsx", 
+                "4. apr_2024_no_guid.xlsx")
+
+# Define Oakland ZIP codes
+oakland_zip_codes <- c("94601", "94602", "94603", "94605", "94606", 
+                        "94607", "94609", "94610", "94611", "94612", 
+                        "94618", "94619", "94621")
+
+# Read, clean, and filter data
+merged_data <- file_names %>%
+  map_dfr(function(file) {
+    file_full_path <- file.path(file_path, file)  # Construct full path
+    df <- read_excel(file_full_path, na = c("n/a", "N/A", "", "NA"))  # Convert 'n/a' to NA
+    
+    df <- df %>%
+      mutate(
+        `Zip Code` = as.character(`Zip Code`),        # Ensure Zip Code is character
+        `Tract Code` = as.character(`Tract Code`),    # Convert Tract Code to character
+        `Tract Code` = str_replace(`Tract Code`, "\\.0$", ""),  # Remove ".0" suffix
+        `Test Date` = as_datetime(`Test Date`)        # Ensure Test Date is DateTime
+      ) %>%
+      filter(`Zip Code` %in% oakland_zip_codes)  # Keep only Oakland ZIP codes
+
+    return(df)
+  })
+
+filtered_data <- merged_data %>%
+  filter(!is.na(`Tract Code`))
+
+nrow(filtered_data)
+head(filtered_data)
+```
+
+```{r}
+census_api_key("34f17c95b8c724b261582ca3ce529cd441191d8c", install = TRUE, overwrite = TRUE)
+```
+
+## Merging Census Data with Filtered Data
+
+### Step 1: Extract Unique Oakland ZIP Codes
+
+### Step 2: Define Census Variables
+
+#### Defines key demographic and economic variables (e.g., median income, racial demographics) using ACS codes.
+
+### Step 3: Clean and Format Data
+
+#### Renames columns for readability and calculates demographic proportions (e.g., White_Prop, Black_Prop).
+
+### Step 4: Merge Census Data with Filtered Data
+
+#### Ensures ZIP code consistency and merges `filtered_data` with census data using a left join.
+
+
+```{r}
+# Extract Unique ZIP Codes from filtered_data
+zip_code_list <- unique(filtered_data$`Zip Code`)
+
+# Define Census Variables
+vars <- c(
+  "median_income" = "B19013_001",  # Median Household Income
+  "white" = "B03002_003",          # White population
+  "black" = "B03002_004",          # Black population
+  "asian" = "B03002_006",          # Asian population
+  "latino" = "B03002_012",         # Hispanic/Latino population
+  "total_pop" = "B03002_001"       # Total population
+)
+
+# Get ACS Data **ONLY for Zip Codes in filtered_data**
+census_data <- get_acs(
+  geography = "zcta",
+  variables = vars,
+  year = 2022,  # Latest available ACS 5-year
+  survey = "acs5",
+  output = "wide",
+  geography_filter = tract_code_list
+)
+
+# Clean and Format the ACS Data
+census_data <- census_data %>%
+  rename(
+    Zip_Code = GEOID,
+    Median_Income = median_incomeE,
+    White_Pop = whiteE,
+    Black_Pop = blackE,
+    Asian_Pop = asianE,
+    Latino_Pop = latinoE,
+    Total_Pop = total_popE
+  ) %>%
+  mutate(
+    White_Prop = White_Pop / Total_Pop,
+    Black_Prop = Black_Pop / Total_Pop,
+    Asian_Prop = Asian_Pop / Total_Pop,
+    Latino_Prop = Latino_Pop / Total_Pop,
+    Non_White_Prop = 1 - White_Prop  
+  ) %>%
+  select(Zip_Code, Median_Income, White_Prop, Non_White_Prop, Black_Prop, Asian_Prop, Latino_Prop)
+
+# Merge with filtered_data
+filtered_data <- filtered_data %>%
+  mutate(`Zip Code` = as.character(`Zip Code`))
+
+census_data <- census_data %>%
+  mutate(Zip_Code = as.character(Zip_Code))
+
+merged_data <- filtered_data %>%
+  left_join(census_data, by = c("Zip Code" = "Zip_Code"))
+
+head(merged_data)
+```
+
+```{r}
+# Remove rows where any required variable is missing
+filtered_data_clean <- merged_data %>%
+  filter(!is.na(Download), 
+         !is.na(Upload), 
+         !is.na(Jitter), 
+         !is.na(Latency))
+```
+
+
+## Question 1: To what extent do socioeconomic status (median household income), racial demographics (proportion of non-white residents), and ZIP code geography predict variation in internet download speeds within Oakland?
+
+
+### Exploratory Plot: Mapping Internet Speeds in Oakland
+
+This exploratory visualization maps **average download and upload speeds** across ZIP codes in Oakland, California. By comparing both speeds side-by-side using spatial choropleth maps, we uncover significant geographic disparities in broadband infrastructure and performance.
+
+---
+
+```{r}
+# Set options for Census data
+options(tigris_use_cache = TRUE)  # Cache the downloaded shapefile
+
+# Download ZIP Code Tabulation Areas (ZCTA) for California from TIGER/Line (2010 dataset)
+oakland_zips <- zctas(cb = FALSE, state = "CA", year = 2010)
+
+# Filter only for ZIP codes within Oakland
+oakland_zip_list <- c("94601", "94602", "94603", "94605", "94606", 
+                       "94607", "94609", "94610", "94611", "94612",
+                       "94618", "94619", "94621")  # Oakland ZIPs
+
+oakland_zips <- oakland_zips %>%
+  filter(ZCTA5CE10 %in% oakland_zip_list)
+
+# Rename ZIP code column for merging
+oakland_zips <- oakland_zips %>%
+  rename(ZIPCODE = ZCTA5CE10) %>%
+  mutate(ZIPCODE = as.character(ZIPCODE))
+
+# Ensure Zip Code column is character type in both datasets
+filtered_data_clean <- filtered_data_clean %>%
+  mutate(`Zip Code` = as.character(`Zip Code`))
+
+# Aggregate average speeds by ZIP Code (remove geometry aggregation)
+zip_speed_summary <- filtered_data_clean %>%
+  group_by(`Zip Code`) %>%
+  summarise(
+    Avg_Download = mean(Download, na.rm = TRUE),
+    Avg_Upload = mean(Upload, na.rm = TRUE)
+  )
+
+# Merge speed data with Oakland ZIP shape data
+oakland_map_data <- oakland_zips %>%
+  left_join(zip_speed_summary, by = c("ZIPCODE" = "Zip Code"))
+
+# Compute centroids for label placement (after merging)
+oakland_map_data_centroids <- st_centroid(oakland_map_data)
+```
+
+
+```{r}
+# Load necessary libraries
+library(leaflet)
+library(sf)
+library(dplyr)
+library(leafsync)
+library(tibble)
+library(htmltools)
+
+# Ensure that the spatial data is in the correct projection (WGS84 for Leaflet)
+oakland_map_data <- st_transform(oakland_map_data, crs = 4326)
+
+# Manually define ZIP code to Area Name mapping
+zip_area_mapping <- tibble(
+  ZIPCODE = c("94601", "94602", "94603", "94605", "94606",
+              "94607", "94608", "94609", "94610", "94611",
+              "94612", "94618", "94619", "94621"),
+  Area_Name = c("Fruitvale", "Dimond", "East Oakland", "Eastmont", "Lower San Antonio",
+                "West Oakland", "North Oakland", "Temescal", "Lakeshore", "Montclair",
+                "Downtown Oakland", "Rockridge", "Redwood Heights", "Elmhurst")
+)
+
+# Convert ZIPCODE to character if necessary
+oakland_map_data$ZIPCODE <- as.character(oakland_map_data$ZIPCODE)
+
+# Join the area names into the spatial data
+oakland_map_data <- left_join(oakland_map_data, zip_area_mapping, by = "ZIPCODE")
+
+# Define color palettes for interactive maps
+download_palette <- colorNumeric("Greens", domain = oakland_map_data$Avg_Download, na.color = "gray")
+upload_palette <- colorNumeric("Reds", domain = oakland_map_data$Avg_Upload, na.color = "gray")
+
+# Create Interactive Download Speed Map with updated label including area name
+download_map <- leaflet(oakland_map_data) %>%
+  addProviderTiles("CartoDB.Positron") %>%  # Use a clean background map
+  addPolygons(
+    fillColor = ~download_palette(Avg_Download),
+    color = "black", weight = 1, opacity = 1, fillOpacity = 0.7,
+    label = ~paste0(ZIPCODE, " (", Area_Name, ") ",
+                    "Download Speed: ", round(Avg_Download, 1), " Mbps"),
+    labelOptions = labelOptions(style = list("font-size" = "12px"),
+                                direction = "auto"),
+    highlightOptions = highlightOptions(color = "yellow", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(pal = download_palette, values = ~Avg_Download, 
+            title = "Download Speed (Mbps)", position = "bottomright")
+
+# Create Interactive Upload Speed Map with updated label including area name
+upload_map <- leaflet(oakland_map_data) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    fillColor = ~upload_palette(Avg_Upload),
+    color = "black", weight = 1, opacity = 1, fillOpacity = 0.7,
+    label = ~paste0("ZIP Code: ", ZIPCODE, " (", Area_Name, ") ",
+                    "Upload Speed: ", round(Avg_Upload, 1), " Mbps"),
+    labelOptions = labelOptions(style = list("font-size" = "12px"),
+                                direction = "auto"),
+    highlightOptions = highlightOptions(color = "yellow", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(pal = upload_palette, values = ~Avg_Upload, 
+            title = "Upload Speed (Mbps)", position = "bottomright")
+
+# Display the two maps in sync (default side by side; add ncol = 1 for vertical stacking if desired)
+sync(download_map, upload_map)
+
+
+```
+
+
+### Key Findings
+
+- **Geographic Inequity**: 
+  - The maps show that **northern and northeastern neighborhoods** (e.g., Rockridge, Montclair, Piedmont) generally experience the **highest speeds** for both download and upload.
+  - **Central and southern areas** (e.g., East Oakland, Fruitvale) show **lower speeds**, particularly in upload bandwidth, indicating possible infrastructure gaps.
+
+- **Download vs. Upload Differences**:
+  - Download speeds are generally higher across the board.
+  - Some neighborhoods that perform reasonably well in download speed still experience relatively **poor upload performance**, which may affect residents' ability to participate in video conferencing, online learning, or remote work.
+
+---
+
+### Mapping Steps
+
+1. ZIP code boundary shapefiles were loaded and filtered for Oakland ZIPs.
+2. Internet speed test results were **aggregated by ZIP code**.
+3. Speed data were merged with shapefiles using common ZIP code identifiers.
+4. Two **interactive Leaflet maps** were generated:
+   - **Download speed** map uses a green color gradient.
+   - **Upload speed** map uses a red color gradient.
+5. Tooltips display exact speed values upon hover, aiding interpretation.
+
+---
+
+### Design Decisions
+
+- A **side-by-side choropleth design** enables direct comparison between download and upload speeds across the same geography.
+- **Green and red gradients** were selected to intuitively signal good (green) vs. poor (red) performance, aligning with user expectations.
+- The use of **interactive maps** (via `leaflet`) allows users to zoom into neighborhoods and explore values dynamically.
+- Legends were included for clarity, with consistent color scaling across ZIP codes.
+
+---
+
+### Changes Based on Feedback
+
+  - In Part 1, the interavtive maps only shows the ZipCode name for each area on pop-up label, and I added the area name (for general audience/residents) for easier understanding because they might be more familiar with area names.
+  - Map aesthetics and layout enhancements are refined.
+
+---
+
+### Audience Considerations
+
+This visualization targets:
+
+- **City policymakers and broadband planners**: to identify neighborhoods with underserved infrastructure.
+- **Community advocacy groups**: to support digital equity campaigns.
+- **Oakland residents**: to better understand how their neighborhoods compare in terms of internet access.
+
+To meet this audience’s needs:
+
+- The maps prioritize **clarity and accessibility**, avoiding excessive technical jargon.
+- **Color contrast and tooltips** support exploration for both casual and professional users.
+- Legends are clearly labeled with Mbps values, and each map focuses on a single variable to avoid confusion.
+
+---
+
+
+### Multiple Linear Regression Model
+
+This test is necessary because it allows us to **simultaneously evaluate the independent effects** of three key predictors:
+
+- **`Median_Income`** *(continuous)*: Captures neighborhood-level socioeconomic status.
+
+- **`Non_White_Prop`** *(continuous)*: Measures the racial composition, used to assess potential racial disparities in internet infrastructure.
+
+- **`ZIP Code`** *(categorical)*: Controls for geographic fixed effects, accounting for unobserved location-specific factors (e.g., infrastructure investments, provider presence, topography).
+
+---
+
+By including ZIP codes as fixed effects, this model isolates the impact of **income** and **race**, **net of location-based variance**. This is critical for distinguishing whether observed disparities are truly driven by demographics or simply reflect **geographic differences**.
+
+---
+
+### What This Model Helps Answer:
+
+- Are **income** and **racial composition** statistically significant predictors of download speed?
+
+- How **large** is their effect, relative to **ZIP-level differences**?
+
+- Which **ZIP codes** are associated with significantly faster or slower speeds, after accounting for demographics?
+
+---
+
+This approach provides a more **causally interpretable framework** than simple group comparisons or correlations and supports **policy-relevant insights** on **equity in digital access**.
+
+
+```{r}
+# Multiple linear model: Median Income, Non-White Proportion, and ZIP Code
+multi_lm <- lm(Download ~ Median_Income + Non_White_Prop + factor(`Zip Code`), data = filtered_data_clean)
+
+# View model summary
+summary(multi_lm)
+```
+## Key Coefficients
+
+### Variable Estimates and Interpretation
+
+| Variable         | Estimate   | Interpretation |
+|------------------|------------|----------------|
+| **Intercept**     | 427.5      | Baseline download speed when all predictors are zero (theoretical; not meaningful alone). |
+| **Median_Income** | -0.001072  | For every $1 increase in median income, download speed decreases by 0.00107 Mbps, holding other variables constant. A $10,000 increase is associated with a ~10.7 Mbps decrease. |
+| **Non_White_Prop**| -330.5     | A 100% increase in non-white population proportion is associated with a 330.5 Mbps decrease in download speed, holding income and ZIP code constant. A 10% increase corresponds to a ~33 Mbps decrease. |
+| **ZIP Codes**     | Varies     | ZIP code fixed effects capture local infrastructure and geographic variation in speeds. 
+
+### Statistical Significance
+
+- All coefficients shown are **highly statistically significant (p < 0.001)**, suggesting strong evidence that these variables affect download speed.
+- **ZIP codes differ significantly** in average speeds, supporting the idea that **geography plays a major role**.
+
+### Model Fit
+
+- **R-squared:** 0.01106  
+  → The model explains only **1.1% of the variance** in download speed, indicating that most variation is unexplained by income, race, and ZIP code alone.
+- **Residual standard error:** 118 Mbps  
+  → Indicates substantial variability in speeds across individual observations.
+
+## Interpretation Summary
+
+- **Median Income**: Surprisingly, higher income is associated with **slightly lower download speeds**. This may suggest **inverse provider investment** or **crowding effects**.
+- **Non-White Proportion**: Areas with more non-white residents tend to have **significantly lower speeds**, highlighting potential **digital inequities** or **structural disadvantages**.
+- **ZIP Code Effects**: Local geographic differences explain much of the variation. Some ZIP codes consistently perform better or worse, pointing to **infrastructure disparities**.
+
+## Final Thoughts
+
+While the predictors are **statistically significant**, their **practical influence is small** relative to the total variance in download speed.  
+This suggests that other factors—such as:
+
+- Device used during testing  
+- Time of test  
+- ISP performance  
+- Network congestion  
+
+—may play a much larger role in determining internet speed.
+
+
+```{r}
+# Extract coefficients and compute confidence intervals
+coef_df <- as.data.frame(coef(summary(multi_lm)))
+coef_df$Variable <- rownames(coef_df)
+rownames(coef_df) <- NULL
+colnames(coef_df)[1:4] <- c("Estimate", "Std.Error", "t.value", "p.value")
+
+# Compute 95% Confidence Intervals
+coef_df <- coef_df %>%
+  mutate(
+    CI_Lower = Estimate - 1.96 * Std.Error,
+    CI_Upper = Estimate + 1.96 * Std.Error,
+    Label_Pos = Estimate + (CI_Upper - CI_Lower) * 0.2  # Moves labels UP by 20% of CI range
+  ) %>%
+  filter(Variable != "(Intercept)")  # Remove intercept for clarity
+
+# Format variable names (changing ZIP Code format)
+coef_df$Variable <- gsub("factor\\(`Zip Code`\\)", "ZIP:", coef_df$Variable)
+
+# Assign colors based on sign of the coefficient
+coef_df$Color <- ifelse(coef_df$Estimate > 0, "#B2182B", "#2166AC")  # Red for positive, Blue for negative
+
+# Plot
+ggplot(coef_df, aes(x = reorder(Variable, Estimate), y = Estimate, color = Color)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.25, linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40", linewidth = 1) +
+  geom_text(aes(label = sprintf("%.2f", Estimate), y = Label_Pos),  
+            size = 3, color = "grey40", fontface = "plain", vjust = -0.8) +  
+  scale_color_identity() +  # Uses pre-defined colors
+  coord_flip() +
+  labs(
+    title = " Effect of Median Income, Racial Composition and ZIPcode on Download Speed",
+    subtitle = "Coefficient Estimates with 95% Confidence Intervals",
+    x = "Predictor Variable",
+    y = "Estimated Effect on Download Speed (Mbps)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5, margin = margin(t = 15)),  # Add top margin
+    plot.subtitle = element_text(size = 10, hjust = 0.5, margin = margin(b = 10)),  # Add bottom margin
+    axis.text.y = element_text(size = 11),
+    legend.position = "none",
+    plot.margin = margin(10, 120, 10, 10)  
+  )
+```
+
+### Findings
+
+This coefficient plot displays the results from a linear regression model estimating the impact of **median income**, **racial composition (Non_White_Prop)**, and **ZIP code fixed effects** on average **download speed (in Mbps)** across Oakland.
+
+Key findings:
+
+- **Racial Composition**:
+  - The proportion of non-white residents (**Non_White_Prop**) has a **strong and statistically significant negative effect** on download speed.
+  - A 100% increase in non-white population share is associated with a **330.5 Mbps decrease** in average download speed, with a narrow confidence interval suggesting high reliability.
+  
+- **Median Income**:
+  - Median income shows **no statistically significant effect** on download speed (coefficient close to 0, with CI crossing zero).
+
+- **ZIP Code Effects**:
+  - Several ZIP codes show significantly higher or lower speeds, suggesting **geographic disparities** beyond race and income:
+    - **ZIP codes 94618 and 94610** show significantly **higher** speeds (73.11 and 63.14 Mbps respectively).
+    - **ZIP codes 94612, 94602, 94607, 94609, 94606** show **significantly lower** speeds, with 94612 being the lowest at -42.84 Mbps.
+
+These results point to a **digital divide** where racial composition and neighborhood geography, more than income, are associated with disparities in download speeds.
+
+### Design Decisions
+
+- A **coefficient plot** was selected for its ability to:
+  - Clearly show effect size and statistical significance.
+  - Communicate both direction (positive/negative) and uncertainty (confidence intervals).
+- **Color-coded dots**:
+  - Red indicates positive coefficients, blue for negative—allowing quick visual identification of advantage/disadvantage.
+- Labels show coefficient values directly on the plot for transparency and accessibility.
+- Predictor variables were reordered to **emphasize interpretable groupings** (ZIP codes, income, race).
+- **Dashed vertical line at 0** helps highlight which predictors have statistically significant effects.
+
+### Changes Based on Feedback
+
+- This plot is newly added after Project part 1. I Switched from a basic summary table to a **coefficient plot**, improving the interpretability of multivariate regression results.
+- Reordered the variables for improved narrative flow and comparison.
+- Adjusted label sizes and confidence interval widths for clarity and visual balance.
+
+### Audience Considerations
+
+The primary audience for this analysis includes:
+
+- **City of Oakland policymakers**, particularly those addressing digital equity and infrastructure.
+- **Education and public service agencies** making decisions about broadband access.
+- **Community advocacy organizations** working toward equitable internet service.
+
+To accommodate this audience:
+
+- The visualization avoids technical regression jargon (e.g., p-values) and instead focuses on **effect sizes and directionality**.
+- **Confidence intervals** are included to signal certainty without overwhelming non-technical viewers.
+- The use of ZIP code identifiers helps local stakeholders connect findings to familiar neighborhoods and service areas.
+
+
+
+## Question 2: Do Zip Code Areas with Lower Income Suffer from a Digital Divide?
+
+### Welch Two-Sample t-test: Download Speed by Poverty Category
+
+A **Welch Two-Sample t-test** was conducted to compare the **mean download speed** between two income groups:  
+**High Income** and **Low Income**, defined by the **median income in Oakland in 2023**.
+
+
+```{r}
+#Median Income of City of Oakland
+oakland_median_income <- 96828
+
+filtered_data_clean <- filtered_data_clean %>%
+  mutate(
+    Poverty_Category = case_when(
+      Median_Income < oakland_median_income ~ "Low Income",
+      Median_Income >= oakland_median_income ~ "High Income"
+    )
+  )
+
+t_test_download <- t.test(Download ~ Poverty_Category, data = filtered_data_clean)
+t_test_download
+```
+
+## Results
+
+- **t-statistic:** -9.1902  
+- **Degrees of Freedom (df):** 633998  
+- **p-value:** < 2.2e-16  
+- **95% Confidence Interval for the Difference in Means:** (-3.2966, -2.1376)  
+- **Mean Download Speed (High Income):** 64.63 Mbps  
+- **Mean Download Speed (Low Income):** 67.35 Mbps  
+
+## Interpretation
+
+### Statistical Significance
+
+- The **p-value is extremely small (< 2.2e-16)**, indicating that the difference in download speeds between High-Income and Low-Income groups is **statistically significant**.
+- This means we **reject the null hypothesis**, confirming that income category has a measurable effect on download speed.
+
+### Effect Size
+
+- The **mean download speed for the Low-Income group (67.35 Mbps)** is **slightly higher** than that of the High-Income group (64.63 Mbps).
+- The **confidence interval (-3.2966, -2.1376)** confirms that the difference is small but consistently negative, meaning **Low-Income areas have slightly higher download speeds** on average.
+
+### Discussion
+
+- Despite the statistical significance, the difference of **about 2.7 Mbps** is **not practically meaningful** for most users.
+- This result contradicts the common assumption that **higher-income areas always have better internet speeds**.
+- The findings suggest that **other factors, such as ISP infrastructure, service provider focus, or government broadband initiatives, might play a larger role in determining internet speed**.
+
+
+## Density Plot Exploration: Distribution of Internet Service Quality in High and Low Income Areas
+
+### Step 1: Data Preparation
+
+- Ensures key columns (`Download`, `Upload`, `Jitter`, `Latency`) are in numeric format.
+- Converts `Zip Code` to character format for consistency.
+- Removes rows with missing values in the selected numeric columns while keeping valid zero values.
+
+### Step 2: Reshape Data for Plotting
+
+- Converts the dataset from wide to long format, making it suitable for faceted plotting.
+- Retains `Poverty_Category` as a key grouping variable.
+- Ensures no missing values in the transformed dataset.
+
+### Step 3: Create Density Plots
+
+- Generates density plots for each metric (`Download`, `Upload`, `Jitter`, `Latency`) to visualize distribution.
+- Uses **facet wrapping** to create a 2×2 grid layout for better comparison.
+- Colors distributions by `Poverty_Category`, distinguishing high and low poverty levels.
+- Maintains flexible axis scales for better readability.
+
+### Apply a Log Transformation
+
+To better visualize the distributions, a **log transformation** will be applied to the `Value` column before plotting:
+
+- The log scale will **spread out smaller values** and **compress larger values**, making patterns more visible.
+- It will help in comparing variables that span multiple orders of magnitude.
+- Log transformation is commonly used for positively skewed data to make trends easier to interpret.
+
+```{r}
+# Ensure numeric columns are properly formatted and remove NA values immediately
+filtered_data_clean <- filtered_data_clean %>%
+  mutate(
+    `Zip Code` = as.character(`Zip Code`),
+    Download = as.numeric(Download),
+    Upload = as.numeric(Upload),
+    Jitter = as.numeric(Jitter),
+    Latency = as.numeric(Latency)
+  ) %>%
+  drop_na(Download, Upload, Jitter, Latency)  # Only remove NA values, keep 0 values
+
+# Convert data to long format for facet plotting
+long_data <- filtered_data_clean %>%
+  select(Poverty_Category, Download, Upload, Jitter, Latency) %>%
+  pivot_longer(cols = c(Download, Upload, Jitter, Latency), 
+               names_to = "Metric", values_to = "Value") %>%
+  drop_na(Value)  # Remove NA values if any remain; 0 values are preserved
+
+# Create the 2×2 density plot with larger individual graphs
+ggplot(long_data, aes(x = Value, fill = Poverty_Category, color = Poverty_Category)) +
+  geom_density(alpha = 0.58, size = 0.6) +  # Increased opacity, added outline
+  facet_wrap(~ Metric, scales = "free", ncol = 2) +  # Keeps 2x2 layout
+  labs(title = "Density Plots of Internet Speeds by Income Level",
+       x = "Value (log scale)",
+       y = "Density",
+       fill = "Income Level",
+       color = "Income Level") +  # Ensure the color legend is visible
+  scale_x_log10() +  # Apply log scale to X-axis
+  theme_minimal() +
+  scale_fill_manual(values = c("High Income" = "royalblue1", "Low Income" = "lightcoral")) +  
+  scale_color_manual(values = c("High Income" = "navy", "Low Income" = "red3"))  
+```
+
+## Interpretation of Density Plots (in Log Scale)
+
+### Key Findings
+
+- **Download & Upload Speeds**: High-income areas (blue) generally show higher speeds compared to low-income areas (red). However, some overlap exists—indicating that not all low-income areas suffer from poor performance.
+- **Jitter**: Low-income areas experience more unstable connections. The density curve for jitter is skewed rightward for these communities, suggesting more frequent extreme values.
+- **Latency**: Low-income neighborhoods also face higher latency, indicating slower and less responsive internet services. The distribution is more right-skewed for these areas compared to high-income ones.
+
+### Reconciling with Statistical Test Results
+
+While the multiple linear regression model showed that **income was not a statistically significant predictor** of download speed (after controlling for ZIP code), these **density plots reveal disparities in spread and skewness** that the model does not capture directly.
+
+This highlights the importance of combining statistical modeling with exploratory visualization:
+- Even if means are similar, **variability and extremes differ**, affecting user experience.
+- **Distributional differences** such as higher jitter and latency in low-income areas imply poorer service quality, even if average download speed appears comparable.
+
+---
+
+### Design Decisions
+
+- **Logarithmic x-axis**: Applied due to the wide range of values (e.g., speeds ranging from <1 Mbps to 1000+ Mbps), improving interpretability.
+- **Density plots**: Chosen over boxplots or histograms to better illustrate the full distribution shape and overlap between groups.
+- **Color Scheme**: Blue and red provide intuitive contrast and clear group separation. A soft transparency (`alpha`) was applied for easy comparison in overlapping regions.
+- **Faceted layout**: Separates each metric (Download, Upload, Jitter, Latency) for focused interpretation while maintaining consistent visual structure.
+
+---
+
+### Changes Based on Feedback
+
+- Implemented **log scale** to normalize extreme values and support visibility of lower-end distributions that were previously compressed.
+- Refined layout and visual clarity to better communicate performance spread, not just central tendencies.
+
+---
+
+### Audience Considerations
+
+This visualization is tailored for:
+
+- **Local policymakers and school district leaders** assessing broadband infrastructure gaps.
+- **Digital equity advocates** looking to identify underserved areas.
+- **Oakland residents** who may wish to understand how their neighborhood's internet experience compares with others.
+
+To accommodate this mixed audience:
+- Log scale is clearly labeled.
+- High and intuitive color contrast was considered in the palette.
+- Plots are visually self-contained and do not rely on interactive elements.
+
+Overall, this visualization supports equitable decision-making by uncovering performance gaps **not visible through averages or statistical significance tests alone**.
+
+
+## Question 3: Does different ISP provide different quality of service?
+
+### Summary
+
+To determine whether different Internet Service Providers (ISPs) offer varying quality of service, we must **compare their average performance metrics**. By calculating the **mean download and upload speeds per ISP**, we can:
+
+- **Quantify service quality differences** between providers.
+- Identify which ISPs consistently offer higher or lower performance.
+- Support further analysis or visualization (e.g., bar plots, statistical tests).
+
+Including the number of observations (`Count`) helps assess **data reliability**—ensuring conclusions are based on sufficiently large samples. This summary lays the foundation for interpreting ISP-level disparities in internet experience across Oakland.
+
+
+```{r}
+# Calculate mean Download and Upload Speeds per ISP
+isp_speed_summary <- filtered_data_clean %>%
+  group_by(ISP) %>%
+  summarise(
+    Avg_Download = mean(Download, na.rm = TRUE),
+    Avg_Upload = mean(Upload, na.rm = TRUE),
+    Count = n()
+  ) %>%
+  arrange(desc(Count))  
+
+isp_speed_summary
+```
+
+
+## Exploratory Visualizing ISP Download vs. Upload Speeds
+
+```{r}
+# 1. Define major ISPs and filter
+selected_isps <- c("amazon.com Inc", "T-Mobile Usa Inc.", "Comcast", 
+                   "Att Services Inc", "Sonic Telecom LLC", "Verizon")
+
+isp_speed_summary_filtered <- isp_speed_summary %>%
+  filter(ISP %in% selected_isps) %>%
+  select(ISP, Avg_Download, Avg_Upload) %>%
+  pivot_longer(cols = c(Avg_Download, Avg_Upload), 
+               names_to = "Metric", values_to = "Speed")
+
+# 2. Flip upload speeds to negative for back-to-back effect
+isp_speed_summary_filtered <- isp_speed_summary_filtered %>%
+  mutate(Speed = ifelse(Metric == "Avg_Upload", -Speed, Speed))
+
+# 3. Compute overall average speeds for Download (positive) and Upload (negative)
+download_avg <- isp_speed_summary_filtered %>%
+  filter(Metric == "Avg_Download") %>%
+  summarise(avg = mean(Speed, na.rm = TRUE)) %>%
+  pull(avg)
+
+upload_avg <- isp_speed_summary_filtered %>%
+  filter(Metric == "Avg_Upload") %>%
+  summarise(avg = mean(Speed, na.rm = TRUE)) %>%
+  pull(avg)
+
+# 4. Define custom colors and label positions
+download_color <- "#85C17E"    # Light Green
+upload_color   <- "goldenrod2" # Gold
+
+isp_speed_summary_filtered <- isp_speed_summary_filtered %>%
+  mutate(
+    label_position = ifelse(Speed > 0, Speed + 30, Speed - 30)  # Shift labels outward
+  )
+
+# 5. Create the back-to-back bar chart
+ggplot(isp_speed_summary_filtered, aes(x = reorder(ISP, Speed), y = Speed, fill = Metric)) +
+  geom_bar(stat = "identity", position = "identity", width = 0.65) +
+  coord_flip() +  # Flip for horizontal bars
+  scale_y_continuous(limits = c(-225, 225), labels = abs) +
+  labs(
+    title = "Upload vs. Download Speeds by Major Internet Service Providers",
+    x = "ISP",
+    y = "Speed (Mbps)",
+    fill = "Metric"
+  ) +
+  scale_fill_manual(values = c("Avg_Download" = download_color, "Avg_Upload" = upload_color)) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 11)) +
+  
+  # 6. Add text labels on the bars
+  geom_text(aes(y = label_position, label = sprintf("%.2f", abs(Speed))),
+            size = 3.8, color = "black", fontface = "bold") +
+  
+  # 7. Add dotted lines for overall average speeds
+  geom_hline(yintercept = download_avg, linetype = "dotted", color = "darkgreen", size = 0.8) +
+  geom_hline(yintercept = upload_avg, linetype = "dotted", color = "darkgoldenrod", size = 0.8) 
+```
+
+### Findings
+
+This back-to-back horizontal bar chart compares average upload and download speeds across six major ISPs operating in Oakland. Upload speeds are shown on the left (negative side) and download speeds on the right, allowing for clear side-by-side comparisons.
+
+Key takeaways:
+
+- Wireline ISPs (**Comcast, AT&T, Sonic**) consistently outperform wireless ISPs (**T-Mobile, Amazon, Verizon**) in both upload and download speeds.
+  - **Sonic Telecom LLC** leads in performance, with an average download speed of ~192 Mbps and upload speed of ~190 Mbps.
+  - **Comcast and AT&T** also provide robust wired services, though with lower upload capacity than Sonic.
+- Wireless providers show considerably lower speeds:
+  - **T-Mobile and Verizon** average download speeds below 50 Mbps and upload speeds below 15 Mbps.
+- Dotted horizontal lines indicate the average upload and download speeds across all six ISPs.
+  - These serve as a visual benchmark: only **Sonic and AT&T** exceed both averages.
+
+### Design Decisions
+
+- **Back-to-back bar chart** format was chosen to maximize clarity when comparing upload and download speeds for each ISP.
+- **Dotted horizontal lines** indicate average values but were left **unlabeled** based on clarity and feedback to reduce clutter.
+- **Rounded, bold labels** on each bar allow for quick numerical insight without needing to consult the axes.
+- **Color scheme** separates metrics clearly:
+  - Light green for download
+  - Goldenrod for upload
+- **Reordering ISPs** by speed helps highlight performance trends by ISP type.
+
+### Changes Based on Feedback
+
+This visualization evolved through feedback and iteration:
+
+- **Added dotted lines** to show the average upload and download speeds to set a benchmark and compare ISP performances and identify the top and worst performers.
+
+### Audience Considerations
+
+This chart is designed for a **mixed audience** that includes:
+
+- Local policymakers and education officials considering which ISPs serve students and residents best.
+- General Oakland residents, particularly those relying on school-provided devices or government broadband subsidies.
+- Advocacy groups and digital equity planners looking to assess infrastructure gaps.
+
+To accommodate this audience:
+
+- **Numerical labels** are included directly on the bars, avoiding technical legends or interactive tools.
+- A **colorblind-friendly palette** was used.
+- The visualization is **self-contained**, assuming limited technical background among viewers.
+
+
+
+### Statistical Test for Question 3
+
+To evaluate whether different internet service providers (ISPs) offer significantly different levels of service, we use the **Kruskal-Wallis test** for both download and upload speeds.
+
+#### Why This Test?
+
+- The **distribution of internet speeds is highly skewed** with noticeable outliers, violating the normality assumption required for ANOVA.
+- The **Kruskal-Wallis test** is a **non-parametric alternative** that compares the **ranked medians** across multiple groups (in this case, different ISPs) without assuming a normal distribution.
+- It is particularly well-suited for **comparing more than two groups** where variances may differ, and where data may not be continuous or normally distributed.
+
+#### What It Helps Us Answer
+
+This test enables us to determine whether there are **statistically significant differences in performance** between ISPs:
+
+- Are some ISPs consistently delivering faster download or upload speeds?
+- Is the variation in speed due to the provider rather than random variation?
+
+This approach is crucial for uncovering potential **provider-level disparities in internet quality**, which is valuable for consumers, policy makers, and digital equity advocates.
+
+
+```{r}
+kruskal.test(Download ~ ISP, data = filtered_data_clean)
+kruskal.test(Upload ~ ISP, data = filtered_data_clean)
+```
+
+
+## Interpretation of Kruskal-Wallis Test Results
+
+### Key Findings
+
+- **Download Speed**: Significant differences exist among ISPs (**χ² = 181745, df = 107, p < 2.2e-16**).  
+- **Upload Speed**: ISPs also show significant variation (**χ² = 158661, df = 107, p < 2.2e-16**).  
+
+### Conclusion
+
+Internet speeds vary significantly across ISPs, suggesting differences in service quality.
+
+
+
+## Question 4: Do Internet Speeds Differ Between Wireline and Wireless Services?
+
+
+#### Comcast, Att Services Inc, and Sonic Telecom LLC provide wireline services (relying on physical cable infrastructure), while T-Mobile Usa Inc., amazon.com Inc, and Verizon operate wireless hotspots (using cellular networks). It will be insightful to analyze these groups separately to see whether it is the service type that influences download and upload speeds.
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# Define ISPs by type
+wireless_isps <- c("amazon.com Inc", "T-Mobile Usa Inc.", "Verizon")
+wired_isps <- c("Comcast", "Att Services Inc", "Sonic Telecom LLC")
+
+# Categorize ISPs
+filtered_data_clean$ISP_Category <- ifelse(
+  filtered_data_clean$ISP %in% wireless_isps, "Wireless",
+  ifelse(filtered_data_clean$ISP %in% wired_isps, "Wired", "Other")
+)
+
+# Set factor level order
+filtered_data_clean$ISP_Category <- factor(
+  filtered_data_clean$ISP_Category,
+  levels = c("Wireless", "Wired", "Other")
+)
+
+# Summarize and format
+isp_distribution <- filtered_data_clean %>%
+  count(ISP_Category) %>%
+  mutate(
+    Percentage = n / sum(n),
+    ISP_List = case_when(
+      ISP_Category == "Wireless" ~ "T-Mobile, Amazon, Verizon",
+      ISP_Category == "Wired" ~ "Comcast, ATT, Sonic",
+      TRUE ~ ""  # no ISP list for Other
+    ),
+    Label = ifelse(
+      ISP_Category == "Other",
+      paste0("Other\nCount: ", comma(n), "\n", round(Percentage * 100, 1), "%"),
+      paste0(
+        ISP_Category, "\n",
+        ISP_List, "\n",
+        "Count: ", comma(n), "\n",
+        round(Percentage * 100, 1), "%"
+      )
+    ),
+    Color = case_when(
+      ISP_Category == "Wireless" ~ "#33a02c",
+      ISP_Category == "Wired" ~ "#1f78b4",
+      TRUE ~ "lightgrey"
+    ),
+    ypos = cumsum(n) - 0.5 * n  # for label stacking
+  )
+
+# Make pie chart
+ggplot(isp_distribution, aes(x = "", y = n, fill = ISP_Category)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y") +
+
+  # Labels inside for Wireless and Wired
+  geom_text(
+    data = subset(isp_distribution, ISP_Category != "Other"),
+    aes(label = Label),
+    position = position_stack(vjust = 0.5),
+    color = "white",
+    fontface = "bold",
+    size = 3.4
+  ) +
+
+  # Label outside for Other
+  geom_text(
+    data = subset(isp_distribution, ISP_Category == "Other"),
+    aes(label = Label, y = ypos),
+    x = 1.3,  # moves the label outside the circle
+    hjust = 0,
+    size = 3.4,
+    fontface = "bold"
+  ) +
+
+  scale_fill_manual(values = isp_distribution$Color) +
+  labs(
+    title = "Internet Service Provider User Distribution by Type",
+    fill = "ISP Type"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+```
+
+### Internet Service Provider User Distribution by Type
+
+This pie chart visualizes the distribution of internet users in Oakland based on the type of service provided—**wireless**, **wired**, or **other** ISPs. It categorizes the top ISPs into two primary groups:
+
+- **Wireless**: T-Mobile, Amazon, Verizon  
+- **Wired**: Comcast, AT&T, Sonic  
+- **Other**: All remaining ISPs grouped together
+
+#### Key Findings
+
+- **Wireless providers dominate** the market in Oakland, serving **67.3%** of users (433,284 observations).
+- **Wired ISPs** account for **32.1%** of users (206,711 observations).
+- **Other ISPs** contribute to only **0.6%** of the user base (3,876 observations).
+
+This indicates a strong reliance on wireless connections in Oakland, which is offering concerns of the internet service quality the residents are relying on, especially when comparing to the earlier chart showing wired ISPs generally offer faster and more reliable service.
+
+---
+
+### Design Decisions
+
+- A **pie chart** was chosen for its intuitive ability to show **proportions of a whole**, allowing viewers to quickly grasp the distribution across ISP types.
+- **Color-coding** was used to distinguish between the three categories:
+  - Green for wireless
+  - Blue for wired
+  - Light gray for other
+- **Direct labeling** within the chart segments (ISP type, provider names, user count, percentage) eliminates the need for viewers to reference a legend or hover, improving clarity.
+
+---
+
+### Changes Based on Feedback
+
+- Fixed the earlier problem that percentage was appearing twice on the pie chart.
+- Ensured font **color contrast** was optimized for clarity and accessibility.
+- Change to only 3 categories to be consistent with the later discussion, and listed the internet service providers which belongs to them in the chart.  
+- Replaced an earlier interactive version with a **static, clearer version** to avoid unnecessary over complication.
+- Avoided the use of abbreviation (ISP) in the header to make sure audience understand what it is.
+
+---
+
+### Audience Considerations
+
+This visualization is designed for:
+
+- **Oakland residents**, helping them understand the dominant types of ISPs in their area.
+- **Policy makers and digital equity advocates**, who can use this information to assess which types of internet service are most accessible and where investment or intervention might be needed.
+- **City planners and educators**, especially in understanding whether wired or wireless connections dominate in areas with school-aged children or underserved communities.
+
+To accommodate this diverse audience, the visualization prioritizes simplicity, legibility, and ease of interpretation, ensuring that **technical knowledge is not required** to extract key insights.
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(grid)  
+
+# Add this before filtering or reshaping
+wireline_isps <- c("Comcast", "Att Services Inc", "Sonic Telecom LLC")
+wireless_isps <- c("T-Mobile Usa Inc.", "amazon.com Inc", "Verizon")
+
+filtered_data_clean <- filtered_data_clean %>%
+  mutate(ISP_Type = case_when(
+    ISP %in% wireline_isps ~ "Wireline",
+    ISP %in% wireless_isps ~ "Wireless",
+    TRUE ~ NA_character_
+  ))
+
+
+# 1. Filter data for non-missing ISP_Type
+isp_data <- filtered_data_clean %>% 
+  filter(!is.na(ISP_Type))
+
+# 2. Reshape data to long format
+long_isp_data <- isp_data %>%
+  select(ISP_Type, Download, Upload) %>%
+  pivot_longer(cols = c(Download, Upload), 
+               names_to = "Metric", 
+               values_to = "Speed")
+
+# 3. Calculate median values for annotation
+medians <- long_isp_data %>%
+  group_by(ISP_Type, Metric) %>%
+  summarize(med_val = median(Speed, na.rm = TRUE), .groups = "drop")
+
+# 4. Create the boxplot
+ggplot(long_isp_data, aes(x = ISP_Type, y = Speed, fill = ISP_Type)) +
+  # Hide outlier points (outlier.shape = NA) and set box outline color
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, color = "gray30", width = 0.5) +
+  
+  # Annotate median values above each box
+  geom_label(
+    data = medians,
+    aes(x = ISP_Type, y = med_val, label = paste0("Median: ", round(med_val, 1))),
+    fill = "white",
+    color = "grey3",
+    fontface = "bold",
+    size = 3.5,
+    label.padding = unit(0.15, "lines"),
+    position = position_nudge(y = 20),  # Move label slightly above the box
+    show.legend = FALSE
+  ) +
+  
+  # Facet for Download vs. Upload
+  facet_wrap(~ Metric, scales = "free_y") +
+  
+  # Zoom the y-axis so outliers above the limit are not shown
+  coord_cartesian(ylim = c(0, 300)) +
+  
+  # Custom color palette for the fill
+  scale_fill_manual(values = c("Wireline" = "#1f78b4", "Wireless" = "#33a02c")) +
+  
+  # Labels and titles
+  labs(
+    title = "Comparison of Internet Speeds by Internet Service Provider Type",
+    subtitle = "Wireline (Comcast, ATT, Sonic) vs. Wireless (T-Mobile, Amazon, Verizon)",
+    x = "ISP Type",
+    y = "Speed (Mbps)"
+  ) +
+  
+  # Theme tweaks for a cleaner look
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),    # Remove vertical grid lines
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold", size = 13),
+    plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 13)
+  )
+
+```
+
+### Comparison of Internet Speeds by Internet Service Provider Type
+
+This boxplot compares **download and upload speeds** between two categories of internet service providers (ISPs) in Oakland: **wireline** (Comcast, AT&T, Sonic) and **wireless** (T-Mobile, Amazon, Verizon). The visualization shows the spread and central tendency (median) of speeds for each ISP type across both metrics.
+
+#### Key Findings
+
+- **Download Speeds**:
+  - **Wireline ISPs** offer significantly higher speeds, with a **median download speed of 64.8 Mbps**.
+  - **Wireless ISPs** have a much lower **median download speed of only 7 Mbps**.
+  - The spread (interquartile range and whiskers) of wireline speeds is also much greater, indicating broader variability and higher top-end performance.
+
+- **Upload Speeds**:
+  - **Wireline** also leads in upload speeds with a **median of 22.5 Mbps**.
+  - **Wireless providers** lag with a **median upload speed of just 5.2 Mbps**.
+
+These stark differences highlight a consistent and substantial performance gap between wired and wireless ISPs in Oakland.
+
+---
+
+### Design Decisions
+
+- A **boxplot** was chosen to clearly show differences in speed distribution, outliers, and medians between ISP types.
+- **Median values were annotated directly** on the boxes to make the key comparisons immediately accessible to viewers.
+- A **facet layout** was used to separately plot upload and download speeds, improving clarity and reducing visual clutter.
+- The color scheme helps distinguish ISP types while maintaining visual consistency with other plots in the report.
+
+---
+
+### Changes Based on Feedback
+
+- **Outliers were removed** from the plot for better readability and to focus on the bulk of the data distribution.
+- **Median values were explicitly labeled**, a change made in response to feedback emphasizing clearer statistical summaries for non-technical audiences.
+- **Y-axis range** was standardized across facets to allow better visual comparison.
+
+---
+
+### Audience Considerations
+
+This chart is tailored for:
+
+- **Policy makers and city officials** who are assessing digital infrastructure gaps and deciding where to invest in high-speed internet.
+- **Community leaders and equity advocates** concerned with digital inclusion and educational access.
+- **Oakland residents** seeking a better understanding of how their internet service compares to others in the city.
+
+To support this audience, the visualization emphasizes **readability, interpretability**, and avoids requiring prior knowledge of statistical methods. Medians were prioritized over means due to the skewed nature of speed data, and the side-by-side layout allows for **direct comparison across ISP types**.
+
+
+
+#### T-test 
+
+This test evaluates whether the **mean download and upload speeds** of wireline and wireless ISP users differ significantly. Specifically, it helps us:
+
+- Determine if **wireline providers (e.g., Comcast, ATT, Sonic)** offer significantly different speeds compared to **wireless providers (e.g., T-Mobile, Amazon, Verizon)**.
+- Assess whether the observed differences in average speeds are statistically meaningful or simply due to random variation.
+
+```{r}
+# Define ISP groups for wireline and wireless
+wireline_isps <- c("Comcast", "Att Services Inc", "Sonic Telecom LLC")
+wireless_isps <- c("T-Mobile Usa Inc.", "amazon.com Inc", "Verizon")
+
+# Create a new column 'ISP_Type' based on ISP membership
+filtered_data_clean <- filtered_data_clean %>%
+  mutate(ISP_Type = case_when(
+    ISP %in% wireline_isps ~ "Wireline",
+    ISP %in% wireless_isps ~ "Wireless",
+    TRUE ~ NA_character_
+  ))
+
+# Optional: Check the distribution of ISP types
+table(filtered_data_clean$ISP_Type)
+
+# Subset the data for each group
+wireline_data <- filtered_data_clean %>% filter(ISP_Type == "Wireline")
+wireless_data <- filtered_data_clean %>% filter(ISP_Type == "Wireless")
+
+# Compute summary statistics for Download and Upload speeds for each group
+wireline_summary <- wireline_data %>%
+  summarise(
+    Avg_Download = mean(Download, na.rm = TRUE),
+    Avg_Upload = mean(Upload, na.rm = TRUE),
+    Count = n()
+  ) %>%
+  mutate(ISP_Type = "Wireline")
+
+wireless_summary <- wireless_data %>%
+  summarise(
+    Avg_Download = mean(Download, na.rm = TRUE),
+    Avg_Upload = mean(Upload, na.rm = TRUE),
+    Count = n()
+  ) %>%
+  mutate(ISP_Type = "Wireless")
+
+# Combine the two summaries into one table
+combined_summary <- bind_rows(wireline_summary, wireless_summary) %>%
+  select(ISP_Type, Count, Avg_Download, Avg_Upload)
+
+# Print the combined summary table
+print(combined_summary)
+```
+
+```{r}
+# Conduct t-tests comparing speeds between the two groups
+t_test_download_ISPType <- t.test(Download ~ ISP_Type, 
+                                  data = filtered_data_clean %>% filter(!is.na(ISP_Type)))
+t_test_upload_ISPType <- t.test(Upload ~ ISP_Type, 
+                                data = filtered_data_clean %>% filter(!is.na(ISP_Type)))
+
+# Output t-test results
+print("T-test for Download Speed by ISP Type:")
+print(t_test_download_ISPType)
+
+print("T-test for Upload Speed by ISP Type:")
+print(t_test_upload_ISPType)
+```
+
+### Interpretation of T-Test Results: Wireline vs. Wireless Internet Speeds
+
+#### Download Speeds
+
+A Welch Two Sample t-test shows a **highly significant difference** in download speeds between ISP types:
+
+- **Mean (Wireless)**: 29.11 Mbps  
+- **Mean (Wireline)**: 142.73 Mbps  
+- **t = -307.98**, **p < 2.2e-16**  
+- **95% CI**: [-114.34, -112.90]
+
+**Interpretation**: Wireline ISPs provide significantly faster download speeds—over 110 Mbps higher on average—than wireless ISPs.
+
+#### Upload Speeds
+
+The upload speed comparison also shows a significant gap:
+
+- **Mean (Wireless)**: 21.91 Mbps  
+- **Mean (Wireline)**: 87.13 Mbps  
+- **t = -182.3**, **p < 2.2e-16**  
+- **95% CI**: [-65.92, -64.52]
+
+**Interpretation**: Wireline users experience much faster upload speeds, averaging 65 Mbps higher than wireless users.
+
+### Summary
+
+Both download and upload speeds are **significantly faster for wireline ISPs**, reinforcing the importance of infrastructure type in internet quality and highlighting a key equity concern for users relying on wireless connections.
+
